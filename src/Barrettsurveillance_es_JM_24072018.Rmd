@@ -1,0 +1,227 @@
+---
+title: "Barrett surveillance esophagitis joint analysis"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+library(splines)
+library(JMbayes)
+library(beepr)
+library(Rcpp)
+library(lme4)
+library(nlme)
+library(Hmisc)
+
+devtools::install_github("drizopoulos/JMbayes")
+```
+
+## Joint analysis (esophagitis)
+
+Afterwards a joint model will be fit.
+
+# Joint model with LGD, sox2 and p53
+
+Because of the many association parameters the shrinkage prior on the association coefficients desribed above will be added.
+
+First the value will be calculated.
+
+```{r, cache = TRUE}
+jmfit_barrett_value_noexpit <- mvJointModelBayes(mvglmer_es, fm_coxh, timeVar = "time", priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+
+summary(jmfit_barrett_value_noexpit, TRUE)
+```
+
+```{r, cache = TRUE}
+tFuns <- c(sox2_value = "expit", p53_value = "expit", LGD_value = "expit")
+
+jmfit_barrett_value_expit <- mvJointModelBayes(mvglmer_es, fm_coxh, timeVar = "time", transFuns = tFuns, priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+
+summary(jmfit_barrett_value_expit, TRUE)
+```
+
+Next also the area will be added.
+The slope is not possible, because there is only a random intercept.
+
+```{r, cache = TRUE}
+Forms <- list("sox2" = list(fixed = ~ 0 + time + I(time^2/2) + I(time*c(age2)) + I(time*(gender == "female")) + I(time*(BElength_cat == "1")) + I(time*(esophagitis == "1")), indFixed = 1:6, random = ~ 0 + time, indRandom = 1, name = "area"),
+               "p53" = list(fixed = ~ 0 + time + I(time^2/2) + I(time*(gender == "female")) + I(time*(BElength_cat == "1")) + I(time*(esophagitis == "1")) + I(time*c(age2)), indFixed = 1:6, random = ~ 0 + time, indRandom = 1, name = "area"),
+               "LGD" = list(fixed = ~ 0 + time + I(time^2/2) + I(time*c(age2)) + I(time*(gender == "female")) + I(time*(BElength_cat == "1")) + I(time*(esophagitis == "1")), indFixed = 1:6, random = ~ 0 + time, indRandom = 1, name = "area"))
+
+jmfit_barrett_area <- mvJointModelBayes(mvglmer_es, fm_coxh, timeVar = "time", Formulas = Forms, priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+
+summary(jmfit_barrett_area, TRUE)
+```
+
+
+# Figure of exemplary patients
+
+```{r, cache = TRUE}
+plot_HR <- function (model, ID1, ID2, which, idVar = "id", max_time = 8) {
+    components <- model$model_info$mvglmer_components
+    families <- model$model_info$families
+    n_outcomes <- length(families)
+    seq_n_outcomes <- seq_len(n_outcomes)
+    X <- components[paste0("X", seq_n_outcomes)]
+    fitY <- mapply("%*%", X, fixef(model), SIMPLIFY = FALSE)
+    ids <- components[paste0("id", seq_n_outcomes)]
+    Zs <- components[paste0("Z", seq_n_outcomes)]
+    bs <- ranef(model, as_list = TRUE)
+    Zb_fun <- function(Z, b, id) rowSums(Z * b[id, , drop = FALSE])
+    Zbs <- mapply(Zb_fun, Zs, bs, ids, SIMPLIFY = FALSE)
+    fitY <- mapply("+", fitY, Zbs, SIMPLIFY = FALSE)
+    alphas <- model$statistics$postMeans$alphas
+    alphasCI_low <-  model$statistics$CIs$alphas[1, ]
+    alphasCI_upp <-  model$statistics$CIs$alphas[2, ]
+    id <- model$model_info$mvglmer_components[[paste0("id", which)]]
+    Data <- model$model_info$mvglmer_components$data
+    which_id1 <- match(ID1, unique(as.character(Data[[idVar]])))
+    which_id2 <- match(ID2, unique(as.character(Data[[idVar]])))
+    fitY1 <- fitY[[which]][id == which_id1, ]
+    fitY2 <- fitY[[which]][id == which_id2, ]
+    y1 <- model$model_info$mvglmer_components[[paste0("y", which)]][id == which_id1]
+    y2 <- model$model_info$mvglmer_components[[paste0("y", which)]][id == which_id2]
+    times1 <- model$model_info$mvglmer_components[[paste0("X", which)]][id == which_id1, 2]
+    times2 <- model$model_info$mvglmer_components[[paste0("X", which)]][id == which_id2, 2]
+    op <- par(mfrow = c(2, 1), oma = c(4, 4, 2, 2), mar = c(0.5, 0, 0, 0),
+              mgp = c(3, 0.4, 0), tcl = -0.25)
+    plot(range(times1, times2, max_time), range(y1, y2), type = "n", xaxt = "n")
+    legend("topleft", c("Patient 1", "Patient 2"), 
+           lty = c(6, 5), pch = c(4, 20), col = c("black", "black"), bty = "y")
+    points(times1[times1 <= max_time], y1[times1 <= max_time], col = "black", pch = 4)
+    points(times2[times2 <= max_time], y2[times2 <= max_time], col = "black", pch = 20)
+    lines(times1[times1 <= max_time], plogis(fitY1)[times1 <= max_time], col = "black", lty = 6)
+    lines(times2[times2 <= max_time], plogis(fitY2)[times2 <= max_time], col = "black", lty = 5)
+    lab <- c("SOX2", "p53", "LGD")[which]
+    mtext(paste(paste(rep(" ", 40), collapse = ""), lab), side = 2, outer = TRUE, line = 2)
+    times <- seq(0, max(times1, times2), length.out = 35)
+    times <- times
+    fits <- approxfun(times2, fitY2, rule = 2)(times) - approxfun(times1, fitY1, rule = 2)(times)
+    matplot(times, cbind(exp(alphas[which] * fits), 
+                         exp(alphasCI_low[which] * fits),
+                         exp(alphasCI_upp[which] * fits)), type = "n")
+    matlines(times[times <= max_time], cbind(exp(alphas[which] * fits), 
+                         exp(alphasCI_low[which] * fits),
+                         exp(alphasCI_upp[which] * fits))[times <= max_time, ],
+            lty = c(1, 3, 3), col = 1)
+    mtext("Follow-up Time (years)", side = 1, outer = TRUE, line = 2)
+    mtext(paste("Hazard Ratio", paste(rep(" ", 35), collapse = "")), side = 2, outer = TRUE, line = 2)
+    par(op)
+}
+```
+
+
+```{r, cache = TRUE}
+for (t in c(1, 1.5, 2, 2.5, 4, 4.5, 5, 6, 7, 8)) {
+  plot_HR(jmfit_barrett_vl_es, ID1 = "ASZ013", ID2 = "EMC057", which = 2, max_time = t)
+}
+```
+
+With the corresponding animation.
+
+```{r}
+saveGIF({
+    for (t in c(1, 1.5, 2, 2.5, 4, 4.5, 5, 6, 7, 8)) {
+    plot_HR(jmfit_barrett_vl_es, ID1 = "ASZ004", ID2 = "ASZ052", which = 2, max_time = t)
+}})
+```
+
+
+# Sensitivity analysis with only LGD and p53 as biomarkers
+
+```{r}
+jmfit_barrett_value_noexpit_sens <- mvJointModelBayes(mvglmer_es_sens, fm_coxh, timeVar = "time", priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+
+summary(jmfit_barrett_value_noexpit_sens, TRUE)
+```
+
+```{r}
+tFuns1 <- c(p53_value = "expit", LGD_value = "expit")
+
+jmfit_barrett_value_expit_sens <- mvJointModelBayes(mvglmer_es_sens, fm_coxh, timeVar = "time", transFuns = tFuns1, priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+summary(jmfit_barrett_value_expit_sens, TRUE)
+```
+
+```{r}
+Forms1 <- list("p53" = list(fixed = ~ 0 + time + I(time^2/2) + I(time*(gender == "female")) + I(time*(BElength_cat == "1")) + I(time*(esophagitis == "1")) + I(time*c(age2)), indFixed = 1:6, random = ~ 0 + time, indRandom = 1, name = "area"),
+               "LGD" = list(fixed = ~ 0 + time + I(time^2/2) + I(time*c(age2)) + I(time*(gender == "female")) + I(time*(BElength_cat == "1")) + I(time*(esophagitis == "1")), indFixed = 1:6, random = ~ 0 + time, indRandom = 1, name = "area"))
+
+jmfit_barrett_area_sens <- mvJointModelBayes(mvglmer_es_sens, fm_coxh, timeVar = "time", Formulas = Forms1, priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+
+summary(jmfit_barrett_area_sens, TRUE)
+```
+
+
+# Discrimation and calibration
+
+Discrimination:
+How well can the model discriminate between patients that had the event from patients that did not.
+
+Calibration:
+How well the model predicts the observed data.
+
+```{r}
+at_least_one <- function (data, Tstart, outcomes = c("LGD", "sox2", "p53"),
+                           timeVar = "time", idVar = "id") {
+     id <- data[[idVar]]
+     id <- match(id, unique(id))
+     lis <- split(data, id)
+     f <- function (d) {
+         dd <- d[d[[timeVar]] <= Tstart, ]
+         mat <- data.matrix(dd[outcomes])
+         test <- colSums(is.na(mat))
+         if (any(test == nrow(mat))) rep(FALSE, nrow(d)) else rep(TRUE, nrow(d))
+     }
+     out <- data[unlist(lapply(lis, f), use.names = FALSE), ]
+     out[complete.cases(out[c("time", "stop", "progression", "age2", "gender",
+                              "BElength_cat", "esophagitis")]), ] 
+     }
+```
+
+```{r}
+roc <- rocJM(jmfit_barrett_value_expit, newdata = at_least_one(CYBARmv_es, Tstart = 2), Tstart = 2, Dt = 2)
+
+plot(roc)
+```
+
+```{r}
+auc <- aucJM(jmfit_barrett_value_expit, newdata = at_least_one(CYBARmv_es, Tstart = 2), Tstart = 2, Dt = 2)
+
+auc
+```
+
+```{r}
+pderr <- prederrJM(jmfit_barrett_value_expit, newdata = at_least_one(CYBARmv_es, Tstart = 2), Tstart = 2, Thoriz = 4) 
+
+pderr
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
