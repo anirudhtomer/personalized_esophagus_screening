@@ -29,6 +29,7 @@ generateBaselineData = function(n_sub){
   
   #every week
   exo_times = seq(0, MAX_FAIL_TIME, by = 7/365)
+  exo_times = seq(0, MAX_FAIL_TIME, by = 1/12)
   patient_data = data.frame(id=rep(id, each=length(exo_times)), 
                             age2 = rep(age2, each=length(exo_times)),
                             gender = rep(gender, each=length(exo_times)),
@@ -69,15 +70,39 @@ generateBaselineData = function(n_sub){
   }
   
   invSurvival <- function (t, u, patient_id) {
-    log(u) + integrate(hazardFunc, lower = 0.001, upper = t, patient_id)$value
+    #gk_weights = 0.5 * t * JMbayes:::gaussKronrod()$wk
+    #gk_points = 0.5 * t * JMbayes:::gaussKronrod()$sk + 0.5 * t
+    log(u) + integrate(hazardFunc, lower = 0.001, upper = t, patient_id, stop.on.error = F)$value
+    #log(u) + sum(gk_weights * hazardFunc(gk_points, patient_id))
   }
   
-  pSurvTime = function(survProb, patient_id){
+  survivalFunc <- function (t, patient_id) {
+    #gk_weights = 0.5 * t * JMbayes:::gaussKronrod()$wk
+    #gk_points = 0.5 * t * JMbayes:::gaussKronrod()$sk + 0.5 * t
+    exp(-integrate(hazardFunc, lower = 0.001, upper = t, patient_id, stop.on.error = F)$value)
+    #exp(-sum(gk_weights * hazardFunc(gk_points, patient_id)))
+  }
+  
+  fastSurvivalFunc <- function (t, patient_id) {
+    gk_weights = 0.5 * t * JMbayes:::gaussKronrod()$wk
+    gk_points = 0.5 * t * JMbayes:::gaussKronrod()$sk + 0.5 * t
+    #exp(-integrate(hazardFunc, lower = 0.001, upper = t, patient_id, stop.on.error = F)$value)
+    exp(-sum(gk_weights * hazardFunc(gk_points, patient_id)))
+  }
+  
+  pSurvTime = function(surv_prob, patient_id){
     Low = 1e-05
     Up <- MAX_FAIL_TIME
+    
+    #print(patient_id)
+    if(fastSurvivalFunc(MAX_FAIL_TIME, patient_id) > surv_prob){
+      return(NA)
+    }
+    
     Root <- try(uniroot(invSurvival, interval = c(Low, Up), 
-                        u = survProb, patient_id=patient_id, tol = 1e-3)$root, TRUE)
+                        u = surv_prob, patient_id=patient_id, tol = 1e-3)$root, TRUE)
     if(inherits(Root, "try-error")){
+      print(Root)
       return(NA)
     }else{
       return(Root)
@@ -85,18 +110,27 @@ generateBaselineData = function(n_sub){
   }
   
   survProbs = runif(n=n_sub, 0, 1)
-  patient_data$prog_time = rep(sapply(1:n_sub, function(i){pSurvTime(survProbs[i], i)}),
-                               each = length(exo_times))
+  ct = makeCluster(max_cores)
+  registerDoParallel(ct)
+  prog_time = foreach(i=1:n_sub, .combine='c', 
+                      .export = c('MAX_FAIL_TIME','patient_data',
+                                  'surv_formula','long_formula',
+                                  'jmfit_barrett_value_expit'),
+                      .packages = c("splines", "JMbayes")) %dopar%{
+                        pSurvTime(survProbs[i], i)
+                      }
+  stopCluster(ct)
+  patient_data$prog_time = rep(prog_time, each = length(exo_times))
   
   
   longX_matrix = model.matrix(long_formula, patient_data)
   
   #Now we add longitudinal data to this patient
-  patient_data$sox2 = sapply(plogis(longX_matrix %*% beta_sox2 + rep(b[,1], each=length(exo_times))), 
+  patient_data$sox2 = sapply(plogis(longX_matrix %*% beta_sox2 + rep(b[,1], each=length(exo_times))),
                              rbinom, n=1, size=1)
-  patient_data$p53 = sapply(plogis(longX_matrix %*% beta_p53 + rep(b[,2], each=length(exo_times))), 
+  patient_data$p53 = sapply(plogis(longX_matrix %*% beta_p53 + rep(b[,2], each=length(exo_times))),
                             rbinom, n=1, size=1)
-  patient_data$LGD = sapply(plogis(longX_matrix %*% beta_LGD + rep(b[,3], each=length(exo_times))), 
+  patient_data$LGD = sapply(plogis(longX_matrix %*% beta_LGD + rep(b[,3], each=length(exo_times))),
                             rbinom, n=1, size=1)
   
   retList = list(patient_data = patient_data, b = b)
@@ -112,17 +146,73 @@ fitJointModel = function(patient_data, n_training,
   registerDoParallel(ct)
   training_data = foreach(i=1:n_training, .combine='rbind', 
                           .export=c("simulateProtocol", "MAX_FAIL_TIME"),
-                          .packages = c("splines", "JMbayes")) %do%{
+                          .packages = c("splines", "JMbayes")) %dopar%{
                             simulateProtocol(training_data[training_data$id == i,])
                           }
   stopCluster(ct)
   
+  training_data = do.call(rbind, by(training_data, INDICES = training_data$id, FUN = function(x){
+    x$stop = c(x$time[2:nrow(x)], tail(x$time,1)+0.001)
+    x$status = c(rep(0,nrow(x)-1), !is.na(x$prog_time[1]))
+    return(x)
+  }))
   
+  cox_part = coxph(Surv(time, stop, status)~age2 + gender + BElength_cat + esophagitis + cluster(id), 
+                   data=training_data, model = T, x = T)
   
-  fitted_jm = NULL
+  mvglmer_part <- mvglmer(list(
+    sox2 ~ time + age2 + gender + BElength_cat + esophagitis + (1 | id),
+    p53  ~ time + age2 + gender + BElength_cat + esophagitis + (1 | id),
+    LGD  ~ time + age2 + gender + BElength_cat + esophagitis + (1 | id)
+  ), data = training_data, families = list(binomial, binomial, binomial), 
+  engine = "JAGS", adapt_delta = 0.99)
+  
+  fitted_jm = mvJointModelBayes(mvglmer_part, cox_part, 
+                                timeVar = "time", 
+                                transFuns = tFuns, 
+                                priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
   
   return(list(training_data = training_data, test_data=test_data,
+              cox_part = cox_part, mvglmer_part = mvglmer_part,
               fitted_jm = fitted_jm))
+}
+
+runFixedSchedule = function(test_data){
+  ct = makeCluster(max_cores)
+  registerDoParallel(ct)
+  nb_offset = foreach(i=unique(test_data$id), .combine='rbind', 
+                      .export=c("simulateProtocol", "MAX_FAIL_TIME"),
+                      .packages = c("splines", "JMbayes")) %do%{
+                        test_data.i = simulateProtocol(test_data[test_data$id == i,])
+                        
+                        test_data.i$time[nrow(test_data.i)] = min(MAX_FAIL_TIME,
+                                                                  test_data.i$time[nrow(test_data.i)])
+                        
+                        offset = tail(test_data.i$time,1) - test_data.i$prog_time[1]
+                        return(c("nb"=nrow(test_data.i), "offset"=offset))
+                      }
+  stopCluster(ct)
+  
+  return(nb_offset)
+}
+
+runRiskBasedSchedule = function(fitted_jm, test_data, threshold){
+  ct = makeCluster(max_cores)
+  registerDoParallel(ct)
+  nb_offset = foreach(i=unique(test_data$id), .combine='rbind', 
+                      .export=c("simulateProtocol", "MAX_FAIL_TIME"),
+                      .packages = c("splines", "JMbayes")) %do%{
+                        test_data.i = simulateRiskBased(fitted_jm, test_data[test_data$id == i,], threshold)
+                        
+                        test_data.i$time[nrow(test_data.i)] = min(MAX_FAIL_TIME,
+                                                                  test_data.i$time[nrow(test_data.i)])
+                        
+                        offset = tail(test_data.i$time,1) - test_data.i$prog_time[1]
+                        return(c("nb"=nrow(test_data.i), "offset"=offset))
+                      }
+  stopCluster(ct)
+  
+  return(nb_offset)
 }
 
 #Send 1 row of data
@@ -161,8 +251,6 @@ simulateProtocol = function(patient_data){
     if(cur_time > min(prog_time, MAX_FAIL_TIME, na.rm = T)){
       if(!is.na(prog_time)){
         ret_data$LGD[nrow(ret_data)] = NA
-      }else{
-        ret_data = ret_data[-nrow(ret_data),]
       }
       break
     }
@@ -171,7 +259,7 @@ simulateProtocol = function(patient_data){
   return(ret_data)
 }
 
-simulateRiskBased = function(patient_data, fitted_jm, threshold){
+simulateRiskBased = function(fitted_jm, patient_data, threshold){
   pDynSurv = function(survProb, patientDs){
     invDynSurvLastTime <- function (time, u, patientDs, maxRiskDt) {
       u - round(survfitJM(fitted_jm, patientDs, survTimes = time)$summaries[[1]][1, "Mean"])
@@ -202,20 +290,15 @@ simulateRiskBased = function(patient_data, fitted_jm, threshold){
   
   ret_data$time = c(0,0.5)
   
-  repeat{
+  while(tail(ret_data$time, 1) < min(prog_time, MAX_FAIL_TIME, na.rm = T)){
     new_time = pDynSurv(survProb = threshold, patientDs = ret_data)
     new_data = patient_data[which.min(abs(available_time_list-new_time)),]
     new_data$time = new_time
     ret_data = rbind(ret_data, new_data)
-    
-    if(tail(ret_data$time,1) > min(prog_time, MAX_FAIL_TIME, na.rm = T)){
-      if(!is.na(prog_time)){
-        ret_data$LGD[nrow(ret_data)] = NA
-      }else{
-        ret_data = ret_data[-nrow(ret_data),]
-      }
-      break
-    }
+  }
+  
+  if(!is.na(prog_time)){
+    ret_data$LGD[nrow(ret_data)] = NA
   }
   
   return(ret_data)

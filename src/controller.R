@@ -1,9 +1,9 @@
-debugSource("src/simCommon.R")
+source("src/simCommon.R")
 
 dataSetNums = 1:10
 
-n_sub = 100
-n_training = 75
+n_sub = 1000
+n_training = 3500
 last_seed = 100
 
 getNextSeed = function(last_seed){
@@ -26,7 +26,7 @@ for(i in dataSetNums){
       print("Error generating simulation data: trying again")
     }else{
       joint_model_data = try(fitJointModel(new_data$patient_data, n_training, 
-                                                  cens_start_time = 0, cens_end_time = 30),T)
+                                           cens_start_time = 0, cens_end_time = 30),T)
       if(inherits(joint_model_data, "try-error")){
         print(joint_model_data)
         last_seed = getNextSeed(last_seed)
@@ -40,32 +40,34 @@ for(i in dataSetNums){
     }
   }
   
-  # schedule_results = do.call(rbind, replicate(length(thresholds), joint_model_data$test_data$testDs.id, simplify = F))
-  # schedule_results = schedule_results[order(schedule_results$id, decreasing = F),]
-  # schedule_results$methodName = rep(c(FIXED,thresholds), nrow(joint_model_data$test_data$testDs.id))
-  # schedule_results$nb = schedule_results$offset = NA
-  # 
-  # #Then we do the PRIAS schedule
-  # print("Running Fixed schedule")
-  # schedule_results[schedule_results$methodName == FIXED, c("nb", "offset")] = runFixedSchedule(joint_model_data$fitted_jm, joint_model_data$test_data)
-  # print("Done running Fixed schedule")
-  # 
-  # #Then we do the schedule with Dyn. Risk of GR
-  # for(threshold in thresholds){
-  #   riskMethodName = as.character(threshold)
-  #   
-  #   print(paste("Running",riskMethodName,"schedule"))
-  #   schedule_results[schedule_results$methodName == riskMethodName, c("nb", "offset")] = runRiskBasedSchedule(joint_model_data$fitted_jm, joint_model_data$test_data, threshold)
-  #   print(paste("Done running",riskMethodName,"schedule"))
-  # }
-  # 
-  # stopCluster(ct)
-  # 
+  #plus 1 because of FIXED
+  schedule_results = do.call(rbind, replicate(length(thresholds)+1, 
+                                              joint_model_data$test_data[!duplicated(joint_model_data$test_data$id),], 
+                                              simplify = F))
+  schedule_results = schedule_results[order(schedule_results$id, decreasing = F),]
+  #automatically repeats itself correctly
+  schedule_results$methodName = c(FIXED,thresholds)
+  schedule_results$nb = schedule_results$offset = NA
+  
+  # Then we do the FIXED schedule
+  print("Running Fixed schedule")
+  schedule_results[schedule_results$methodName == FIXED, c("nb", "offset")] = runFixedSchedule(joint_model_data$test_data)
+  print("Done running Fixed schedule")
+   
+  #Then we do the schedule with Dyn. Risk of GR
+  for(threshold in thresholds){
+     riskMethodName = as.character(threshold)
+     
+     print(paste("Running",riskMethodName,"schedule"))
+     schedule_results[schedule_results$methodName == riskMethodName, c("nb", "offset")] = runRiskBasedSchedule(joint_model_data$fitted_jm, joint_model_data$test_data, threshold)
+     print(paste("Done running",riskMethodName,"schedule"))
+  }
+   
   # print(paste("********* Saving the results ******"))
   # 
-  # joint_model_data$test_data$schedule_results = schedule_results
-  # saveName = paste0("joint_model_data_seed_",joint_model_data$seed,"_simNr_",i, ".Rdata")
+  joint_model_data$schedule_results = schedule_results
+  saveName = paste0("joint_model_data_seed_",joint_model_data$seed,"_simNr_",i, ".Rdata")
   # save(joint_model_data, file = paste0("Rdata/simulation/", saveName))
-  # rm(schedule_results)
-  # rm(joint_model_data)
+  rm(schedule_results)
+  rm(joint_model_data)
 }

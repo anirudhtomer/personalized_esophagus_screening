@@ -1,2 +1,5 @@
 Rdata/*
 !Rdata/.gitignore
+.Rproj.user
+.Rhistory
+*.stan
