@@ -7,7 +7,7 @@ library(doParallel)
 load("Rdata/data.RData")
 
 MAX_FAIL_TIME = 14
-max_cores = 4
+max_cores = 7
 
 surv_formula = ~ age2 + gender + BElength_cat + esophagitis
 long_formula = ~ time + age2 + gender + BElength_cat + esophagitis
@@ -28,8 +28,7 @@ generateBaselineData = function(n_sub){
   esophagitis_log_odds_notime = -3.69772 + rnorm(n_sub, mean=0, sd = 1.829)
   
   #every week
-  exo_times = seq(0, MAX_FAIL_TIME, by = 7/365)
-  exo_times = seq(0, MAX_FAIL_TIME, by = 1/12)
+  exo_times = seq(0, MAX_FAIL_TIME, length.out=MAX_FAIL_TIME * 50)
   patient_data = data.frame(id=rep(id, each=length(exo_times)), 
                             age2 = rep(age2, each=length(exo_times)),
                             gender = rep(gender, each=length(exo_times)),
@@ -120,8 +119,9 @@ generateBaselineData = function(n_sub){
                         pSurvTime(survProbs[i], i)
                       }
   stopCluster(ct)
-  patient_data$prog_time = rep(prog_time, each = length(exo_times))
   
+  print(paste("Event rate:", 100 * sum(!is.na(prog_time)/n_sub)))
+  patient_data$prog_time = rep(prog_time, each = length(exo_times))
   
   longX_matrix = model.matrix(long_formula, patient_data)
   
@@ -160,17 +160,19 @@ fitJointModel = function(patient_data, n_training,
   cox_part = coxph(Surv(time, stop, status)~age2 + gender + BElength_cat + esophagitis + cluster(id), 
                    data=training_data, model = T, x = T)
   
+  
   mvglmer_part <- mvglmer(list(
     sox2 ~ time + age2 + gender + BElength_cat + esophagitis + (1 | id),
     p53  ~ time + age2 + gender + BElength_cat + esophagitis + (1 | id),
     LGD  ~ time + age2 + gender + BElength_cat + esophagitis + (1 | id)
   ), data = training_data, families = list(binomial, binomial, binomial), 
-  engine = "JAGS", adapt_delta = 0.99)
+  engine = "JAGS", control=list(n.processors=max_cores))
   
   fitted_jm = mvJointModelBayes(mvglmer_part, cox_part, 
                                 timeVar = "time", 
                                 transFuns = tFuns, 
-                                priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE))
+                                priors = list(shrink_gammas = TRUE, shrink_alphas = TRUE), 
+                                control =  list(n_cores=max_cores))
   
   return(list(training_data = training_data, test_data=test_data,
               cox_part = cox_part, mvglmer_part = mvglmer_part,
@@ -182,7 +184,7 @@ runFixedSchedule = function(test_data){
   registerDoParallel(ct)
   nb_offset = foreach(i=unique(test_data$id), .combine='rbind', 
                       .export=c("simulateProtocol", "MAX_FAIL_TIME"),
-                      .packages = c("splines", "JMbayes")) %do%{
+                      .packages = c("splines", "JMbayes")) %dopar%{
                         test_data.i = simulateProtocol(test_data[test_data$id == i,])
                         
                         test_data.i$time[nrow(test_data.i)] = min(MAX_FAIL_TIME,
@@ -200,8 +202,8 @@ runRiskBasedSchedule = function(fitted_jm, test_data, threshold){
   ct = makeCluster(max_cores)
   registerDoParallel(ct)
   nb_offset = foreach(i=unique(test_data$id), .combine='rbind', 
-                      .export=c("simulateProtocol", "MAX_FAIL_TIME"),
-                      .packages = c("splines", "JMbayes")) %do%{
+                      .export=c("simulateRiskBased", "MAX_FAIL_TIME"),
+                      .packages = c("splines", "JMbayes")) %dopar%{
                         test_data.i = simulateRiskBased(fitted_jm, test_data[test_data$id == i,], threshold)
                         
                         test_data.i$time[nrow(test_data.i)] = min(MAX_FAIL_TIME,
@@ -262,13 +264,12 @@ simulateProtocol = function(patient_data){
 simulateRiskBased = function(fitted_jm, patient_data, threshold){
   pDynSurv = function(survProb, patientDs){
     invDynSurvLastTime <- function (time, u, patientDs, maxRiskDt) {
-      u - round(survfitJM(fitted_jm, patientDs, survTimes = time)$summaries[[1]][1, "Mean"])
+      u - survfitJM(fitted_jm, patientDs, survTimes = time)$summaries[[1]][1, "Mean"]
     }
     
     Low = max(patientDs$time) + 1e-05
     Up <- MAX_FAIL_TIME
     
-    tries = tries + 1
     Root <- try(uniroot(invDynSurvLastTime, interval = c(Low, Up), 
                         u = survProb, patientDs = patientDs)$root, TRUE)
     
@@ -286,7 +287,7 @@ simulateRiskBased = function(fitted_jm, patient_data, threshold){
   #Choose 6 months of data
   ret_data = patient_data[sapply(c(0,0.5), FUN = function(x){
     which.min(abs(available_time_list - x))
-  })]
+  }),]
   
   ret_data$time = c(0,0.5)
   

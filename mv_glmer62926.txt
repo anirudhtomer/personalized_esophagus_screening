@@ -1,0 +1,39 @@
+model {
+    for (j1 in 1:N1) {
+        eta1[j1] <- u[id1[j1], RE_ind1] * Z1[j1, ] + inprod(betas1[c(2, 5, 6)], X1[j1, c(2, 5, 6)])
+        logit(mu1[j1]) <- max(-15, min(15, eta1[j1]))
+        y1[j1] ~ dbin(mu1[j1], 1)
+    }
+    for (j2 in 1:N2) {
+        eta2[j2] <- u[id2[j2], RE_ind2] * Z2[j2, ] + inprod(betas2[c(2, 5, 6)], X2[j2, c(2, 5, 6)])
+        logit(mu2[j2]) <- max(-15, min(15, eta2[j2]))
+        y2[j2] ~ dbin(mu2[j2], 1)
+    }
+    for (j3 in 1:N3) {
+        eta3[j3] <- u[id3[j3], RE_ind3] * Z3[j3, ] + inprod(betas3[c(2, 5, 6)], X3[j3, c(2, 5, 6)])
+        logit(mu3[j3]) <- max(-15, min(15, eta3[j3]))
+        y3[j3] ~ dbin(mu3[j3], 1)
+    }
+    for (i in 1:n) {
+        mu.u[i, 1] <- inprod(betas1[c(1, 3, 4)], Xhc1[i, c(1, 3, 4)])
+        b[i, 1] <- u[i, 1] - mu.u[i, 1]
+        mu.u[i, 2] <- inprod(betas2[c(1, 3, 4)], Xhc2[i, c(1, 3, 4)])
+        b[i, 2] <- u[i, 2] - mu.u[i, 2]
+        mu.u[i, 3] <- inprod(betas3[c(1, 3, 4)], Xhc3[i, c(1, 3, 4)])
+        b[i, 3] <- u[i, 3] - mu.u[i, 3]
+        u[i, 1:n_RE] ~ dmnorm(mu.u[i, ], inv_D[, ])
+    }
+    for (k1 in 1:ncx1) {
+        betas1[k1] ~ dnorm(0.0, tau_betas1)
+    }
+    for (k2 in 1:ncx2) {
+        betas2[k2] ~ dnorm(0.0, tau_betas2)
+    }
+    for (k3 in 1:ncx3) {
+        betas3[k3] ~ dnorm(0.0, tau_betas3)
+    }
+    inv_D ~ dwish(4 * priorR_D[, ], priorK_D)
+     for (l in 1:n_RE) {
+         priorR_D[l, l] ~ dgamma(A_RD, B_RD)
+     }
+}

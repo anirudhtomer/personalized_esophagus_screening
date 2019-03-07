@@ -1,17 +1,17 @@
 source("src/simCommon.R")
 
-dataSetNums = 1:10
+dataSetNums = 4:20
 
-n_sub = 1000
-n_training = 3500
-last_seed = 100
+n_sub = 1500
+n_training = 1000
+last_seed = 104
 
 getNextSeed = function(last_seed){
   return(last_seed + 1)
 }
 
 FIXED = "Fixed"
-thresholds = c(0.025,0.05, 0.1)
+thresholds = 1 - seq(0, 0.05, by= 0.005)[-1]
 for(i in dataSetNums){
   print(paste("******** Started working on Data Set: ", i, "*******"))
   
@@ -40,6 +40,9 @@ for(i in dataSetNums){
     }
   }
   
+  saveName = paste0("joint_model_data_seed_",joint_model_data$seed,"_simNr_",i, ".Rdata")
+  save(joint_model_data, file = paste0("Rdata/simulation/", saveName))
+  
   #plus 1 because of FIXED
   schedule_results = do.call(rbind, replicate(length(thresholds)+1, 
                                               joint_model_data$test_data[!duplicated(joint_model_data$test_data$id),], 
@@ -67,7 +70,7 @@ for(i in dataSetNums){
   # 
   joint_model_data$schedule_results = schedule_results
   saveName = paste0("joint_model_data_seed_",joint_model_data$seed,"_simNr_",i, ".Rdata")
-  # save(joint_model_data, file = paste0("Rdata/simulation/", saveName))
+  save(joint_model_data, file = paste0("Rdata/simulation/", saveName))
   rm(schedule_results)
   rm(joint_model_data)
 }
